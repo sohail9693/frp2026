@@ -1,0 +1,6 @@
+local_model/
+__pycache__/
+*.safetensors
+*.h5
+*.pt
+*.bin
