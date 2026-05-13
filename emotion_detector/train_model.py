@@ -1,68 +1,19 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    accuracy_score
-)
-
 from transformers import pipeline
-import joblib
 
 # =========================
-# LOAD DATASET
-# =========================
-
-print("Loading dataset...")
-df = pd.read_csv("student_data.csv")
-
-# =========================
-# LOAD EMOTION MODEL
+# LOAD MODEL
 # =========================
 
 print("Loading Emotion AI Model...")
 
 clf = pipeline(
     "text-classification",
-    model="j-hartmann/emotion-english-distilroberta-base",
-    top_k=None
+    model="j-hartmann/emotion-english-distilroberta-base"
 )
 
 # =========================
-# EMOTION → RISK MAP
+# WORD LISTS
 # =========================
-
-EMOTION_MAP = {
-    "joy": 0,
-    "neutral": 0,
-    "surprise": 0,
-    "optimism": 0,
-
-    "sadness": 1,
-    "fear": 1,
-    "nervousness": 1,
-
-    "anger": 2,
-    "disgust": 2,
-}
-
-# =========================
-# CUSTOM KEYWORDS
-# =========================
-
-MODERATE_WORDS = [
-    "depressed",
-    "overwhelmed",
-    "hopeless",
-    "panic",
-    "worthless",
-    "burned out",
-    "exhausted",
-]
 
 HIGH_RISK_WORDS = [
     "suicide",
@@ -74,8 +25,19 @@ HIGH_RISK_WORDS = [
     "better off dead",
 ]
 
+MODERATE_WORDS = [
+    "depressed",
+    "overwhelmed",
+    "hopeless",
+    "panic",
+    "worthless",
+    "burned out",
+    "exhausted",
+]
+
 NEUTRAL_WORDS = [
     "salary",
+    "payment",
     "meeting",
     "project",
     "assignment",
@@ -83,180 +45,217 @@ NEUTRAL_WORDS = [
 ]
 
 # =========================
-# FEATURE EXTRACTION
+# MAIN ANALYSIS FUNCTION
 # =========================
 
-print("Analyzing student texts...")
+def analyze_emotion(text, sleep_hours, study_hours):
 
-ai_base_risks = []
-ai_confidences = []
-
-for idx, row in df.iterrows():
-
-    text = str(row["Student_Text"])
+    text = str(text)
     tl = text.lower()
 
-    # -------------------------
+    # =====================
     # HIGH RISK OVERRIDE
-    # -------------------------
+    # =====================
 
     if any(word in tl for word in HIGH_RISK_WORDS):
-        ai_base_risks.append(3)
-        ai_confidences.append(1.0)
-        continue
 
-    # -------------------------
+        return {
+            "emotion": "High Risk",
+            "risk": "HIGH",
+            "confidence": 100,
+            "stress": 95,
+            "anxiety": 98,
+            "focus": 10,
+            "engagement": 5,
+            "label": "crisis"
+        }
+
+    # =====================
     # RUN TRANSFORMER MODEL
-    # -------------------------
+    # =====================
 
-    results = clf(text[:512])
+    result = clf(text[:512])[0]
 
-    best = max(results[0], key=lambda x: x["score"])
+    label = result["label"].lower()
+    confidence = round(result["score"] * 100, 2)
 
-    label = best["label"].lower()
-    score = best["score"]
-
-    # -------------------------
+    # =====================
     # LOW CONFIDENCE FIX
-    # -------------------------
+    # =====================
 
-    if score < 0.75:
+    if confidence < 75:
         label = "neutral"
 
-    # -------------------------
+    # =====================
     # NEUTRAL OVERRIDE
-    # -------------------------
+    # =====================
 
     if any(word in tl for word in NEUTRAL_WORDS):
         label = "neutral"
 
-    # -------------------------
-    # EMOTION → RISK
-    # -------------------------
-
-    base_risk = EMOTION_MAP.get(label, 0)
-
-    # -------------------------
+    # =====================
     # MODERATE WORD BOOST
-    # -------------------------
+    # =====================
 
-    if any(word in tl for word in MODERATE_WORDS):
-        base_risk = max(base_risk, 2)
+    moderate_detected = any(word in tl for word in MODERATE_WORDS)
 
-    ai_base_risks.append(base_risk)
-    ai_confidences.append(score)
+    # =====================
+    # FINAL LOGIC
+    # =====================
+
+    emotion = "Neutral"
+    risk = "Normal"
+
+    stress = 10
+    anxiety = 10
+    focus = 70
+    engagement = 75
+
+    # ---------------------
+    # HAPPY
+    # ---------------------
+
+    if label in ["joy", "optimism"]:
+
+        emotion = "Joy / Happy"
+        risk = "Normal"
+
+        stress = 5
+        anxiety = 5
+        focus = 80
+        engagement = 85
+
+    # ---------------------
+    # SAD
+    # ---------------------
+
+    elif label == "sadness":
+
+        emotion = "Sadness"
+        risk = "Low"
+
+        stress = 40
+        anxiety = 35
+        focus = 45
+        engagement = 40
+
+    # ---------------------
+    # FEAR / NERVOUS
+    # ---------------------
+
+    elif label in ["fear", "nervousness"]:
+
+        emotion = "Anxiety"
+        risk = "Moderate"
+
+        stress = 70
+        anxiety = 80
+        focus = 30
+        engagement = 40
+
+    # ---------------------
+    # ANGER
+    # ---------------------
+
+    elif label in ["anger", "disgust"]:
+
+        emotion = "Anger / Frustration"
+        risk = "Moderate"
+
+        stress = 75
+        anxiety = 60
+        focus = 35
+        engagement = 30
+
+    # ---------------------
+    # NEUTRAL
+    # ---------------------
+
+    elif label == "neutral":
+
+        emotion = "Neutral"
+        risk = "Normal"
+
+        stress = 10
+        anxiety = 10
+        focus = 75
+        engagement = 70
+
+    # =====================
+    # MODERATE BOOST
+    # =====================
+
+    if moderate_detected:
+
+        risk = "Moderate"
+
+        stress += 25
+        anxiety += 25
+
+        focus -= 15
+        engagement -= 10
+
+    # =====================
+    # SLEEP FACTOR
+    # =====================
+
+    if sleep_hours < 5:
+
+        stress += 15
+        anxiety += 15
+
+        focus -= 10
+
+    # =====================
+    # STUDY FACTOR
+    # =====================
+
+    if study_hours > 10:
+
+        stress += 10
+        anxiety += 10
+
+    # =====================
+    # LIMIT VALUES
+    # =====================
+
+    stress = max(0, min(stress, 100))
+    anxiety = max(0, min(anxiety, 100))
+    focus = max(0, min(focus, 100))
+    engagement = max(0, min(engagement, 100))
+
+    # =====================
+    # RETURN RESULT
+    # =====================
+
+    return {
+
+        "emotion": emotion,
+        "risk": risk,
+        "confidence": confidence,
+
+        "stress": stress,
+        "anxiety": anxiety,
+        "focus": focus,
+        "engagement": engagement,
+
+        "label": label
+    }
+
 
 # =========================
-# ADD FEATURES
+# TEST
 # =========================
 
-df["AI_Base_Risk"] = ai_base_risks
-df["AI_Confidence"] = ai_confidences
+text = input("Enter student text: ")
 
-# =========================
-# TRAIN MODEL
-# =========================
-
-print("\nTraining Hybrid AI Model...")
-
-X = df[
-    [
-        "AI_Base_Risk",
-        "AI_Confidence",
-        "Sleep_Hours",
-        "Study_Hours"
-    ]
-]
-
-y = df["Actual_Risk_Level"]
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.2,
-    random_state=42
+result = analyze_emotion(
+    text=text,
+    sleep_hours=7,
+    study_hours=4
 )
 
-rf_model = RandomForestClassifier(
-    n_estimators=100,
-    max_depth=5,
-    random_state=42
-)
+print("\n===== RESULT =====")
 
-rf_model.fit(X_train, y_train)
-
-# =========================
-# PREDICTIONS
-# =========================
-
-y_pred = rf_model.predict(X_test)
-
-acc = accuracy_score(y_test, y_pred)
-
-print(f"\nModel Accuracy: {acc * 100:.2f}%")
-
-print("\nClassification Report:\n")
-print(classification_report(y_test, y_pred))
-
-# =========================
-# SAVE MODEL
-# =========================
-
-joblib.dump(rf_model, "student_hybrid_model.pkl")
-
-print("\nModel saved as student_hybrid_model.pkl")
-
-# =========================
-# CONFUSION MATRIX
-# =========================
-
-plt.figure(figsize=(8, 6))
-
-cm = confusion_matrix(y_test, y_pred)
-
-sns.heatmap(
-    cm,
-    annot=True,
-    fmt='d',
-    cmap='Blues'
-)
-
-plt.title("Confusion Matrix")
-plt.xlabel("Predicted")
-plt.ylabel("Actual")
-
-plt.tight_layout()
-
-plt.savefig("confusion_matrix.png")
-
-print("Saved confusion_matrix.png")
-
-# =========================
-# FEATURE IMPORTANCE
-# =========================
-
-plt.figure(figsize=(8, 5))
-
-importances = rf_model.feature_importances_
-
-features = [
-    "Emotion Risk",
-    "AI Confidence",
-    "Sleep Hours",
-    "Study Hours"
-]
-
-sns.barplot(
-    x=importances,
-    y=features
-)
-
-plt.title("Feature Importance")
-
-plt.tight_layout()
-
-plt.savefig("feature_importance.png")
-
-print("Saved feature_importance.png")
-
-print("\nHybrid AI Training Complete!")
+for k, v in result.items():
+    print(f"{k}: {v}")
