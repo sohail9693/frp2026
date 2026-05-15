@@ -1,13 +1,14 @@
 """
-Student Emotional AI Test Detector  ·  v4.1 (Fixed)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Fixes applied over v4.0:
-  • Bug #1  – Emotion color no longer overwritten after lifestyle risk bump
-  • Bug #2  – Slider values rounded before passing to inference
-  • Bug #3  – Fixed mixed pack/grid geometry manager in history panel
-  • Fix #4  – FocusOut placeholder restoration added
-  • Fix #5  – Input length warning (>1000 chars)
-  • Fix #6  – Expanded crisis keyword list
+Student Emotional AI Test Detector  ·  v5.0 (Improved)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Major improvements in v5.0:
+  • Added negation detection ("not sad" won't trigger sadness)
+  • Added intensity modifiers (very/really amplify, slightly reduces)
+  • Improved compound emotion analysis
+  • Better contextual risk calculation
+  • Enhanced alerts with specific recommendations
+  • Added positive context handling (flip negative emotions)
+  • Expanded keyword lists with variations
 
 Install:
     pip install customtkinter transformers torch pillow
@@ -73,20 +74,57 @@ EMOTION_ICONS = {
     "fear":     "😰",
 }
 
-# ── FIX #6: Expanded crisis keyword list ──────────────────────────────────────
+# ── IMPROVED: Crisis keyword list with variations ────────────────────────────
 HIGH_RISK_WORDS = [
-    "suicide", "kill myself", "end my life",
-    "want to die", "i want to die", "kms",
-    "end it all", "not want to be here",
-    "self harm", "hurt myself", "cutting myself",
+    "suicide", "kill myself", "end my life", "end myself",
+    "want to die", "i want to die", "i wanna die", "kms",
+    "end it all", "not want to be here", "not want to live",
+    "self harm", "hurt myself", "cutting myself", "cut myself",
     "overdose", "take my life", "no reason to live",
-    "better off dead", "can't go on",
+    "better off dead", "can't go on", "cant go on",
+    "slash my wrists", "hang myself", "jump off", "kill me",
+    "no point", "nothing matters", "empty inside", "better without me",
 ]
+
+# Words indicating moderate emotional distress
 MODERATE_WORDS = [
-    "depressed", "overwhelmed", "hopeless",
-    "can't cope", "breaking down", "panic",
-    "worthless", "exhausted", "falling apart",
-    "no one cares", "give up", "burned out",
+    "depressed", "overwhelmed", "hopeless", "helpless",
+    "can't cope", "cant cope", "breaking down", "falling apart",
+    "panic", "anxious", "worthless", "useless", "exhausted",
+    "no one cares", "nobody cares", "give up", "gave up",
+    "burned out", "burnout", "drained", "mentally exhausted",
+    "emotionally drained", "can't handle", "falling behind",
+    "failing", "failed", "disappointed", "hurt", "pain",
+]
+
+# Negation words that flip emotion meaning
+NEGATION_WORDS = [
+    "not", "don't", "dont", "doesn't", "doesnt", "didn't", "didnt",
+    "won't", "wont", "wouldn't", "wouldnt", "never", "no", "none",
+    "nothing", "nobody", "neither", "hardly", "barely", "scarcely",
+    "isn't", "isnt", "aren't", "arent", "wasn't", "wasnt",
+]
+
+# Intensity modifiers that amplify or reduce emotion intensity
+INTENSITY_AMPLIFIERS = [
+    "very", "really", "extremely", "absolutely", "completely",
+    "totally", "incredibly", "so", "such", "deeply", "highly",
+    "super", "overly", "way", "too", "severely", "intensely",
+]
+
+INTENSITY_REDUCERS = [
+    "slightly", "somewhat", "a bit", "a little", "kind of",
+    "sort of", "mostly", "relatively", "fairly", "partially",
+    "barely", "hardly", "scarcely", "rarely", "occasionally",
+]
+
+# Positive context words that can flip negative emotions
+# More specific phrases that indicate positive resolution
+POSITIVE_CONTEXT_WORDS = [
+    "getting better", "improving", "recovering", "feeling better",
+    "doing better", "coping better", "managed to", "handled it",
+    "feeling okay now", "feeling fine", "alright now", "ok now",
+    "thriving", "balanced", "in a good place",
 ]
 
 STATUS_MAP = {
@@ -97,102 +135,295 @@ STATUS_MAP = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CORE LOGIC (pure functions — fully unit-testable without GUI)
+# IMPROVED CORE LOGIC - Context-aware emotion classification
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _check_negated(text_lower: str, target_word: str) -> bool:
+    """Check if a target word is preceded by a negation word."""
+    words = text_lower.split()
+    for i, word in enumerate(words):
+        if target_word in word or word == target_word:
+            start_idx = max(0, i - 3)
+            context = " ".join(words[start_idx:i+1])
+            if any(neg in context for neg in NEGATION_WORDS):
+                return True
+    return False
+
+
+def _detect_intensity(text_lower: str) -> float:
+    """
+    Detect intensity multiplier from modifiers in text.
+    Returns: 1.0 (neutral), >1.0 (amplified), or <1.0 (reduced)
+    Note: Only applies when not in negated context
+    """
+    intensity = 1.0
+    is_negated = any(neg in text_lower for neg in NEGATION_WORDS)
+
+    if is_negated:
+        return 1.0
+
+    for amplifier in INTENSITY_AMPLIFIERS:
+        if amplifier in text_lower:
+            intensity += 0.25
+            break
+
+    for reducer in INTENSITY_REDUCERS:
+        if reducer in text_lower:
+            intensity -= 0.25
+            break
+
+    return max(0.5, min(1.5, intensity))
+
+
+def _check_positive_context(text_lower: str) -> bool:
+    """Check if there's positive context that might flip negative emotions."""
+    for phrase in POSITIVE_CONTEXT_WORDS:
+        if phrase in text_lower:
+            return True
+    return False
+
+
+def _analyze_compound_emotions(text_lower: str) -> list:
+    """
+    Analyze text for multiple emotional indicators.
+    Returns list of detected emotion categories (with negation handling).
+    """
+    detected = []
+
+    positive_words = ["happy", "excited", "joy", "great", "good", "amazing", "wonderful", "love"]
+    negative_words = {
+        "sadness": ["sad", "unhappy", "down", "depressed", "upset", "disappointed", "miserable", "lonely"],
+        "anger": ["angry", "mad", "frustrated", "annoyed", "irritated", "furious"],
+        "fear": ["anxious", "worried", "scared", "fear", "nervous", "panic", "afraid", "terrified"],
+        "disgust": ["disgusted", "gross", "repulsed", "sick", "nauseous"],
+    }
+
+    for word in positive_words:
+        if word in text_lower:
+            if not _check_negated(text_lower, word):
+                detected.append("joy")
+                break
+
+    for emotion, words in negative_words.items():
+        for word in words:
+            if word in text_lower:
+                if not _check_negated(text_lower, word):
+                    detected.append(emotion)
+                    break
+
+    if any(w in text_lower for w in ["surprised", "shocked", "amazed", "unexpected"]):
+        detected.append("surprise")
+
+    return detected
+
+
 def classify_emotion(model_label: str, score: float, text_lower: str):
     """
+    IMPROVED: Context-aware emotion classification with negation detection.
     Returns (display_name, emotion_color, status_text, risk_level, icon)
     emotion_color is always the emotion's own color — never the status color.
     Risk levels: 0=normal  1=low  2=moderate  3=high
     """
-    if any(w in text_lower for w in HIGH_RISK_WORDS):
+    high_risk_found = False
+    for word in HIGH_RISK_WORDS:
+        if word in text_lower:
+            if not _check_negated(text_lower, word):
+                high_risk_found = True
+                break
+
+    if high_risk_found:
         return "Distress", S_RED, "🚨 High Risk", 3, "😰"
 
-    name, color, base_risk = EMOTION_MAP.get(model_label, ("Unknown", T_SEC, 0))
+    intensity = _detect_intensity(text_lower)
+    has_positive_context = _check_positive_context(text_lower)
+    compound_emotions = _analyze_compound_emotions(text_lower)
 
-    if any(w in text_lower for w in MODERATE_WORDS):
+    base_name, color, base_risk = EMOTION_MAP.get(model_label, ("Unknown", T_SEC, 0))
+
+    moderate_found = False
+    for word in MODERATE_WORDS:
+        if word in text_lower and not _check_negated(text_lower, word):
+            moderate_found = True
+            break
+    if moderate_found:
         base_risk = max(base_risk, 2)
+
+    if has_positive_context and base_risk > 0:
+        base_risk = max(0, base_risk - 1)
+
+    if intensity > 1.0:
+        base_risk = min(3, base_risk + 1)
+    elif intensity < 1.0 and base_risk > 0:
+        base_risk = max(0, base_risk - 1)
+
+    if compound_emotions:
+        if "joy" in compound_emotions and base_risk > 1:
+            base_risk = max(0, base_risk - 1)
+        if "sadness" in compound_emotions or "fear" in compound_emotions:
+            base_risk = min(3, base_risk + 1)
+
+    if model_label == "neutral":
+        if any(word in text_lower for word in ["tired", "exhausted", "sleepy", "drained"]):
+            base_risk = max(base_risk, 1)
+        elif any(word in text_lower for word in ["fine", "okay", "alright", "good"]):
+            base_risk = 0
 
     status_text, _ = STATUS_MAP[base_risk]
     icon = EMOTION_ICONS.get(model_label, "😐")
-    return name, color, status_text, base_risk, icon
+    return base_name, color, status_text, base_risk, icon
 
 
 def compute_metrics(risk: int, score: float, sleep_hrs: float, study_hrs: float):
-    """Compute stress/focus/anxiety/engagement (0-100)."""
+    """Improved: Compute stress/focus/anxiety/engagement (0-100) with more nuance."""
+    confidence_weight = min(1.0, max(0.3, score))
+
     if risk == 3:
-        base = dict(stress=92, focus=8,  anxiety=90, engagement=10)
+        base = dict(
+            stress=max(85, int(95 * confidence_weight)),
+            focus=max(5, int(15 * (1 - confidence_weight))),
+            anxiety=max(85, int(95 * confidence_weight)),
+            engagement=max(5, int(10 * (1 - confidence_weight)))
+        )
     elif risk == 2:
-        s = int(score * 78)
-        base = dict(stress=s, focus=max(10, 68 - s // 2),
-                    anxiety=int(score * 72), engagement=max(12, 55 - s // 3))
+        s = int(70 * confidence_weight + 15)
+        base = dict(
+            stress=s,
+            focus=max(15, 65 - int(s * 0.4)),
+            anxiety=int(65 * confidence_weight + 10),
+            engagement=max(20, 60 - int(s * 0.3))
+        )
     elif risk == 1:
-        s = int(score * 45)
-        base = dict(stress=s, focus=max(40, 75 - s // 2),
-                    anxiety=int(score * 40), engagement=max(40, 72 - s // 4))
+        s = int(40 * confidence_weight + 10)
+        base = dict(
+            stress=s,
+            focus=max(35, 70 - int(s * 0.5)),
+            anxiety=int(35 * confidence_weight + 10),
+            engagement=max(40, 65 - int(s * 0.4))
+        )
     else:
-        base = dict(stress=max(5, int((1 - score) * 22)),
-                    focus=min(95, int(score * 92)),
-                    anxiety=max(5, int((1 - score) * 18)),
-                    engagement=min(95, int(score * 88)))
+        positive_score = confidence_weight
+        base = dict(
+            stress=max(3, int((1 - positive_score) * 25)),
+            focus=min(95, int(88 * positive_score + 10)),
+            anxiety=max(3, int((1 - positive_score) * 20)),
+            engagement=min(95, int(85 * positive_score + 15))
+        )
 
-    if sleep_hrs < 4:
-        base["stress"]     = min(100, base["stress"]     + 20)
-        base["anxiety"]    = min(100, base["anxiety"]    + 18)
-        base["focus"]      = max(0,   base["focus"]      - 25)
-        base["engagement"] = max(0,   base["engagement"] - 20)
+    sleep_impact = 0
+    if sleep_hrs < 3:
+        sleep_impact = 25
+        base["stress"] = min(100, base["stress"] + 22)
+        base["anxiety"] = min(100, base["anxiety"] + 20)
+        base["focus"] = max(0, base["focus"] - 30)
+        base["engagement"] = max(0, base["engagement"] - 25)
+    elif sleep_hrs < 5:
+        sleep_impact = 12
+        base["stress"] = min(100, base["stress"] + 12)
+        base["anxiety"] = min(100, base["anxiety"] + 10)
+        base["focus"] = max(0, base["focus"] - 15)
+        base["engagement"] = max(0, base["engagement"] - 12)
     elif sleep_hrs < 6:
-        base["stress"]     = min(100, base["stress"]     + 10)
-        base["anxiety"]    = min(100, base["anxiety"]    + 8)
-        base["focus"]      = max(0,   base["focus"]      - 12)
-        base["engagement"] = max(0,   base["engagement"] - 10)
+        sleep_impact = 5
+        base["stress"] = min(100, base["stress"] + 5)
+        base["focus"] = max(0, base["focus"] - 5)
     elif sleep_hrs >= 8:
-        base["focus"]      = min(100, base["focus"]      + 5)
-        base["engagement"] = min(100, base["engagement"] + 5)
-        base["stress"]     = max(0,   base["stress"]     - 5)
+        sleep_impact = -5
+        base["focus"] = min(100, base["focus"] + 8)
+        base["engagement"] = min(100, base["engagement"] + 6)
+        base["stress"] = max(0, base["stress"] - 5)
 
-    if study_hrs > 10:
-        base["stress"]     = min(100, base["stress"]     + 15)
-        base["anxiety"]    = min(100, base["anxiety"]    + 12)
-        base["focus"]      = max(0,   base["focus"]      - 10)
+    study_impact = 0
+    if study_hrs > 12:
+        study_impact = 20
+        base["stress"] = min(100, base["stress"] + 18)
+        base["anxiety"] = min(100, base["anxiety"] + 15)
+        base["focus"] = max(0, base["focus"] - 15)
+    elif study_hrs > 10:
+        study_impact = 12
+        base["stress"] = min(100, base["stress"] + 12)
+        base["anxiety"] = min(100, base["anxiety"] + 10)
+        base["focus"] = max(0, base["focus"] - 8)
     elif study_hrs > 8:
-        base["stress"]     = min(100, base["stress"]     + 6)
+        study_impact = 5
+        base["stress"] = min(100, base["stress"] + 6)
     elif study_hrs < 2:
-        base["engagement"] = max(0,   base["engagement"] - 15)
-        base["focus"]      = max(0,   base["focus"]      - 8)
+        study_impact = -5
+        if risk < 2:
+            base["engagement"] = max(0, base["engagement"] - 18)
+            base["focus"] = max(0, base["focus"] - 10)
 
     return base
 
 
 def build_alerts(risk: int, metrics: dict, sleep_hrs: float, study_hrs: float):
-    """Build prioritised alert list including lifestyle factors."""
+    """Improved: Build prioritised alert list with more specific recommendations."""
     alerts = []
+
     if risk == 3:
-        alerts.append(("🚨", "Crisis keywords detected — escalate immediately.", S_RED))
-    if metrics["stress"] > 75:
-        alerts.append(("⚠", "High stress detected — consider counselling referral.", S_YELLOW))
-    if metrics["anxiety"] > 68:
-        alerts.append(("⚠", "Elevated anxiety — recommend a short break.", S_YELLOW))
-    if metrics["focus"] < 30:
-        alerts.append(("⚠", "Low focus — student may need academic support.", S_YELLOW))
-    if sleep_hrs < 5:
-        alerts.append(("🛌", f"Only {sleep_hrs:.0f}h sleep reported — affects cognition.", S_ORANGE))
-    if study_hrs > 10:
-        alerts.append(("📚", f"{study_hrs:.0f}h study reported — burnout risk, suggest breaks.", S_ORANGE))
-    if study_hrs < 2 and risk < 2:
-        alerts.append(("📖", "Low study hours — encourage consistent revision schedule.", A_BLUE))
+        alerts.append(("🚨", "HIGH RISK: Immediate intervention required. Contact counseling services.", S_RED))
+        alerts.append(("📞", "Crisis hotline available: Encourage student to reach out for support.", S_RED))
+
+    if metrics["stress"] > 80:
+        alerts.append(("⚠", "Critical stress levels — recommend immediate break and counseling.", S_YELLOW))
+    elif metrics["stress"] > 65:
+        alerts.append(("⚠", "High stress detected — suggest stress management techniques.", S_YELLOW))
+
+    if metrics["anxiety"] > 75:
+        alerts.append(("😰", "Severe anxiety — recommend breathing exercises and professional support.", S_YELLOW))
+    elif metrics["anxiety"] > 55:
+        alerts.append(("😟", "Elevated anxiety — encourage mindfulness breaks.", S_YELLOW))
+
+    if metrics["focus"] < 25:
+        alerts.append(("🎯", "Very low focus — may indicate burnout or health issues.", S_YELLOW))
+    elif metrics["focus"] < 40:
+        alerts.append(("⚡", "Reduced focus — suggest study environment optimization.", A_BLUE))
+
+    if sleep_hrs < 4:
+        alerts.append(("🛌", f"CRITICAL: Only {sleep_hrs:.1f}h sleep — severely impacts cognition & mood.", S_RED))
+    elif sleep_hrs < 5:
+        alerts.append(("😴", f"Only {sleep_hrs:.1f}h sleep — affects mental health and focus.", S_ORANGE))
+    elif sleep_hrs < 6:
+        alerts.append(("😪", f"{sleep_hrs:.1f}h sleep — slightly below optimal. Recommend earlier bedtime.", S_YELLOW))
+
+    if study_hrs > 12:
+        alerts.append(("🔥", f"OVERLOAD: {study_hrs:.1f}h — high burnout risk. Suggest urgent breaks.", S_RED))
+    elif study_hrs > 10:
+        alerts.append(("📚", f"Heavy load: {study_hrs:.1f}h — monitor for exhaustion signs.", S_ORANGE))
+    elif study_hrs > 8:
+        alerts.append(("⏰", f"{study_hrs:.1f}h studying — consider balanced schedule with breaks.", S_YELLOW))
+
+    if study_hrs < 2 and risk < 2 and sleep_hrs >= 6:
+        alerts.append(("📖", "Low study engagement — check for motivation issues.", A_BLUE))
+
+    if metrics["engagement"] < 30:
+        alerts.append(("💭", "Low engagement detected — explore underlying causes.", A_BLUE))
+
     if not alerts:
-        alerts.append(("✓", "No significant risk detected. Continue monitoring.", S_GREEN))
+        alerts.append(("✓", "All metrics within healthy range. Continue regular monitoring.", S_GREEN))
+
     return alerts
 
 
 def contextual_risk_bump(base_risk: int, sleep_hrs: float, study_hrs: float) -> int:
-    """Bump risk level up if lifestyle factors are severe."""
-    if sleep_hrs < 4 or study_hrs > 12:
-        return min(3, base_risk + 1)
-    if sleep_hrs < 5.5 or study_hrs > 9:
-        return min(2, max(base_risk, 1))
-    return base_risk
+    """Improved: More nuanced risk adjustment based on lifestyle factors."""
+    new_risk = base_risk
+
+    if sleep_hrs < 3.5 or study_hrs > 13:
+        new_risk = min(3, base_risk + 2)
+    elif sleep_hrs < 4.5 or study_hrs > 11:
+        new_risk = min(3, base_risk + 1)
+    elif sleep_hrs < 5.5:
+        new_risk = max(base_risk, 1)
+    elif sleep_hrs > 9:
+        if base_risk > 1:
+            new_risk = max(0, base_risk - 1)
+
+    if study_hrs < 1 and base_risk == 0:
+        pass
+    elif study_hrs > 14:
+        new_risk = min(3, new_risk + 1)
+
+    return new_risk
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,7 +492,7 @@ class MiniMetric(ctk.CTkFrame):
 class EmotionApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Student Emotional AI  ·  Detector  v4.1")
+        self.title("Student Emotional AI  ·  Detector  v5.0")
         self.geometry("1200x720")
         self.minsize(1080, 660)
         self.configure(fg_color=BG_APP)
@@ -324,7 +555,7 @@ class EmotionApp(ctk.CTk):
                                corner_radius=6, border_width=1,
                                border_color=A_PURPLE)
         vbadge.pack(side="left", padx=10, pady=14)
-        ctk.CTkLabel(vbadge, text="v4.1 · 7-Emotion AI",
+        ctk.CTkLabel(vbadge, text="v5.0 · Context-Aware AI",
                      font=F(9,"bold"), text_color=A_PURPLE).pack(padx=8, pady=2)
 
         pill = ctk.CTkFrame(bar, fg_color=BG_CARD, corner_radius=16,
@@ -452,11 +683,13 @@ class EmotionApp(ctk.CTk):
     # ── Slider callbacks ──────────────────────────────────────────────────────
     def _on_sleep_change(self, val):
         hrs = round(val * 2) / 2
-        if hrs < 4:
+        if hrs < 3.5:
+            color, hint = S_RED,    "⚠ Critical: Severe sleep deprivation"
+        elif hrs < 4.5:
             color, hint = S_RED,    "⚠ Severe sleep deprivation"
-        elif hrs < 6:
+        elif hrs < 5.5:
             color, hint = S_YELLOW, "⚠ Poor sleep — affects focus"
-        elif hrs < 7:
+        elif hrs < 6:
             color, hint = S_YELLOW, "△ Below optimal sleep"
         else:
             color, hint = S_GREEN,  "✓ Good sleep"
@@ -466,11 +699,15 @@ class EmotionApp(ctk.CTk):
 
     def _on_study_change(self, val):
         hrs = round(val * 2) / 2
-        if hrs > 12:
+        if hrs > 14:
+            color, hint = S_RED,    "⚠ Critical: Extreme over-studying"
+        elif hrs > 12:
             color, hint = S_RED,    "⚠ Over-studying — burnout risk"
-        elif hrs > 9:
+        elif hrs > 10:
             color, hint = S_YELLOW, "△ Heavy study load"
-        elif hrs < 2:
+        elif hrs > 8:
+            color, hint = S_YELLOW, "△ Moderately high study"
+        elif hrs < 1:
             color, hint = T_SEC,    "△ Very low study time"
         else:
             color, hint = A_BLUE,   "✓ Healthy study load"
@@ -780,19 +1017,27 @@ class EmotionApp(ctk.CTk):
         rl_color = {3:S_RED, 2:S_YELLOW, 1:"#60A5FA"}.get(risk, S_GREEN)
         self._risk_lbl.configure(text=rl_text, text_color=rl_color)
 
-        if sleep_hrs < 4:
+        if sleep_hrs < 3.5:
+            sf, sfc = f"{sleep_hrs:.1f}h — Critical", S_RED
+        elif sleep_hrs < 4.5:
             sf, sfc = f"{sleep_hrs:.1f}h — Severe deprivation", S_RED
-        elif sleep_hrs < 6:
+        elif sleep_hrs < 5.5:
             sf, sfc = f"{sleep_hrs:.1f}h — Poor sleep", S_YELLOW
+        elif sleep_hrs < 6:
+            sf, sfc = f"{sleep_hrs:.1f}h — Below optimal", S_YELLOW
         else:
             sf, sfc = f"{sleep_hrs:.1f}h — OK", S_GREEN
         self._sleep_factor_lbl.configure(text=sf, text_color=sfc)
 
-        if study_hrs > 10:
+        if study_hrs > 14:
+            stf, stfc = f"{study_hrs:.1f}h — Critical overload", S_RED
+        elif study_hrs > 12:
             stf, stfc = f"{study_hrs:.1f}h — Burnout risk", S_RED
-        elif study_hrs > 8:
+        elif study_hrs > 10:
             stf, stfc = f"{study_hrs:.1f}h — Heavy load", S_YELLOW
-        elif study_hrs < 2:
+        elif study_hrs > 8:
+            stf, stfc = f"{study_hrs:.1f}h — Moderate", S_YELLOW
+        elif study_hrs < 1:
             stf, stfc = f"{study_hrs:.1f}h — Very low", T_SEC
         else:
             stf, stfc = f"{study_hrs:.1f}h — Healthy", S_GREEN
@@ -809,23 +1054,33 @@ class EmotionApp(ctk.CTk):
                       detected, risk, sleep_hrs, study_hrs):
         clean_status = status.replace("🚨 ","").replace("⚠  ","").replace("✓  ","")
         lines = [
+            f"━━━ DETECTION RESULTS ━━━",
             f"Emotion Detected  :  {emotion}",
             f"Risk Status       :  {clean_status}",
             f"AI Confidence     :  {score*100:.1f}%",
         ]
         if detected:
             lines.append(f"Risk Keywords     :  {', '.join(detected)}")
-        lines.append(f"Sleep Context     :  {sleep_hrs:.1f} hrs")
-        lines.append(f"Study Context     :  {study_hrs:.1f} hrs")
         lines.append("")
+        lines.append(f"━━━ LIFESTYLE CONTEXT ━━━")
+        lines.append(f"Sleep             :  {sleep_hrs:.1f} hrs")
+        lines.append(f"Study             :  {study_hrs:.1f} hrs")
+        lines.append("")
+        lines.append(f"━━━ RECOMMENDATION ━━━")
         if risk == 3:
-            lines.append("⚠ Immediate professional intervention required.")
+            lines.append("🚨 CRITICAL: Immediate professional intervention required.")
+            lines.append("   Contact student counseling services immediately.")
+            lines.append("   Consider emergency protocols if needed.")
         elif risk == 2:
-            lines.append("Student shows signs of emotional distress.\nConsider a wellbeing check-in.")
+            lines.append("⚠ MODERATE RISK: Student shows emotional distress signs.")
+            lines.append("   Recommended: Schedule a wellbeing check-in.")
+            lines.append("   Consider referring to campus counseling.")
         elif risk == 1:
-            lines.append("Low-level risk detected. Monitor closely.")
+            lines.append("ℹ LOW RISK: Minor indicators detected.")
+            lines.append("   Recommended: Continue monitoring, offer support if needed.")
         else:
-            lines.append("No immediate concern. Regular monitoring recommended.")
+            lines.append("✓ NORMAL: No significant risk indicators.")
+            lines.append("   Recommended: Regular check-ins, maintain engagement.")
         return "\n".join(lines)
 
     # ── CLEAR ─────────────────────────────────────────────────────────────────
